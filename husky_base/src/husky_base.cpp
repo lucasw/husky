@@ -1,339 +1,91 @@
-#include "husky_base/husky_base.hpp"
+/**
+*
+*  \author     Paul Bovbel <pbovbel@clearpathrobotics.com>
+*  \copyright  Copyright (c) 2014-2015, Clearpath Robotics, Inc.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*     * Redistributions of source code must retain the above copyright
+*       notice, this list of conditions and the following disclaimer.
+*     * Redistributions in binary form must reproduce the above copyright
+*       notice, this list of conditions and the following disclaimer in the
+*       documentation and/or other materials provided with the distribution.
+*     * Neither the name of Clearpath Robotics, Inc. nor the
+*       names of its contributors may be used to endorse or promote products
+*       derived from this software without specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+* ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+* WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL CLEARPATH ROBOTICS, INC. BE LIABLE FOR ANY
+* DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+* LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+* SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*
+* Please send comments, questions, or patches to code@clearpathrobotics.com
+*
+*/
 
+#include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <limits>
 #include <memory>
-#include <vector>
+#include <string>
+#include <thread>
 
-#include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "husky_base/husky_hardware.hpp"
+#include "controller_manager/controller_manager.hpp"
 #include "rclcpp/rclcpp.hpp"
 
-namespace
-{
-  const uint8_t LEFT = 0, RIGHT = 1;
-}
+using namespace std::chrono_literals;
 
-namespace husky_base
-{
-  static const std::string HW_NAME = "HuskyBase";
+const int DEFAULT_UPDATE_RATE = 100;
 
-  /**
-  * Get current encoder travel offsets from MCU and bias future encoder readings against them
-  */
-  void HuskyBase::resetTravelOffset()
-  {
-    horizon_legacy::Channel<clearpath::DataEncoders>::Ptr enc = horizon_legacy::Channel<clearpath::DataEncoders>::requestData(
-      polling_timeout_);
-    if (enc)
-    {
-      for (auto i = 0u; i < hw_states_position_offset_.size(); i++)
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+
+  std::shared_ptr<rclcpp::Executor> executor =
+    std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
+  std::string manager_node_name = "controller_manager";
+
+  auto cm = std::make_shared<controller_manager::ControllerManager>(
+    executor,
+    manager_node_name);
+
+  // TODO(anyone): Due to issues with the MutliThreadedExecutor, this control loop does not rely on
+  // the executor (see issue #260).
+  // When the MutliThreadedExecutor issues are fixed (ros2/rclcpp#1168), this loop should be
+  // converted back to a timer.
+  std::thread cm_thread([cm]() {
+      // load controller_manager update time parameter
+      int update_rate = DEFAULT_UPDATE_RATE;
+      if (!cm->get_parameter("update_rate", update_rate)) 
       {
-        hw_states_position_offset_[i] = linearToAngular(enc->getTravel(i % 2));
+        RCLCPP_WARN(cm->get_logger(), "'update_rate' parameter not set, using default value.");
       }
-    }
-    else
-    {
-      RCLCPP_FATAL(
-        rclcpp::get_logger(HW_NAME), "Could not get encoder data to calibrate travel offset");
-    }
-  }
+      RCLCPP_INFO(cm->get_logger(), "update rate is %d Hz", update_rate);
 
-  /**
-  * Husky reports travel in metres, need radians for ros_control RobotHW
-  */
-  double HuskyBase::linearToAngular(const double &travel) const
-  {
-    return (travel / wheel_diameter_ * 2.0f);
-  }
-
-  /**
-  * RobotHW provides velocity command in rad/s, Husky needs m/s,
-  */
-  double HuskyBase::angularToLinear(const double &angle) const
-  {
-    return (angle * wheel_diameter_ / 2.0f);
-  }
-
-  void HuskyBase::writeCommandsToHardware()
-  {
-    double diff_speed_left = angularToLinear(hw_commands_[LEFT]);
-    double diff_speed_right = angularToLinear(hw_commands_[RIGHT]);
-
-    limitDifferentialSpeed(diff_speed_left, diff_speed_right);
-
-    horizon_legacy::controlSpeed(diff_speed_left, diff_speed_right, max_accel_, max_accel_);
-  }
-
-  void HuskyBase::limitDifferentialSpeed(double &diff_speed_left, double &diff_speed_right)
-  {
-    double large_speed = std::max(std::abs(diff_speed_left), std::abs(diff_speed_right));
-
-    if (large_speed > max_speed_)
-    {
-      diff_speed_left *= max_speed_ / large_speed;
-      diff_speed_right *= max_speed_ / large_speed;
-    }
-  }
-
-
-  /**
-  * Pull latest speed and travel measurements from MCU, and store in joint structure for ros_control
-  */
-  void HuskyBase::updateJointsFromHardware()
-  {
-
-    horizon_legacy::Channel<clearpath::DataEncoders>::Ptr enc =
-      horizon_legacy::Channel<clearpath::DataEncoders>::requestData(polling_timeout_);
-    if (enc)
-    {
-      RCLCPP_WARN(
-        rclcpp::get_logger(HW_NAME),
-        "Received linear distance information (L: %f, R: %f)",
-        enc->getTravel(LEFT), enc->getTravel(RIGHT));
-      for (auto i = 0u; i < hw_states_position_.size(); i++)
+      while (rclcpp::ok()) 
       {
-        double delta = linearToAngular(enc->getTravel(i % 2)) - hw_states_position_[i] - hw_states_position_offset_[i];
-
-        // detect suspiciously large readings, possibly from encoder rollover
-        if (std::abs(delta) < 1.0f)
-        {
-          hw_states_position_[i] += delta;
-        }
-        else
-        {
-          // suspicious! drop this measurement and update the offset for subsequent readings
-          hw_states_position_offset_[i] += delta;
-          RCLCPP_INFO(
-            rclcpp::get_logger(HW_NAME),"Dropping overflow measurement from encoder");
-        }
+        std::chrono::system_clock::time_point begin = std::chrono::system_clock::now();
+        cm->read();
+        cm->update();
+        cm->write();
+        std::chrono::system_clock::time_point end = std::chrono::system_clock::now();
+        std::this_thread::sleep_for(
+          std::max(
+            std::chrono::nanoseconds(0),
+            std::chrono::nanoseconds(1000000000 / update_rate) -
+            std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)));
       }
-    }
+    });
 
-    horizon_legacy::Channel<clearpath::DataDifferentialSpeed>::Ptr speed =
-      horizon_legacy::Channel<clearpath::DataDifferentialSpeed>::requestData(polling_timeout_);
-    if (speed)
-    {
-      RCLCPP_WARN(
-        rclcpp::get_logger(HW_NAME),
-        "Received linear speed information (L: %f, R: %f)",
-        speed->getLeftSpeed(), speed->getRightSpeed());
-
-      for (auto i = 0u; i < hw_states_velocity_.size(); i++)
-      {
-        if (i % 2 == LEFT)
-        {
-          hw_states_velocity_[i] = linearToAngular(speed->getLeftSpeed());
-        }
-        else
-        { // assume RIGHT
-          hw_states_velocity_[i] = linearToAngular(speed->getRightSpeed());
-        }
-      }
-    }
-  }
-
-
-hardware_interface::return_type HuskyBase::configure(
-  const hardware_interface::HardwareInfo & info)
-{
-  if (configure_default(info) != hardware_interface::return_type::OK)
-  {
-    return hardware_interface::return_type::ERROR;
-  }
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Name: %s", info_.name.c_str());
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Number of Joints %u", info_.joints.size());
-
-  hw_start_sec_ = std::stod(info_.hardware_parameters["hw_start_duration_sec"]);
-  hw_stop_sec_ = std::stod(info_.hardware_parameters["hw_stop_duration_sec"]);
-  hw_states_position_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
-  hw_states_position_offset_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
-  hw_states_velocity_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
-  hw_commands_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
-
-  wheel_diameter_ = std::stod(info_.hardware_parameters["wheel_diameter"]);
-  max_accel_ = std::stod(info_.hardware_parameters["max_accel"]);
-  max_speed_ = std::stod(info_.hardware_parameters["max_speed"]);
-  polling_timeout_ = std::stod(info_.hardware_parameters["polling_timeout"]);
-
-  serial_port_ = info_.hardware_parameters["serial_port"];
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Port: %s", serial_port_.c_str());
-  horizon_legacy::connect(serial_port_);
-  horizon_legacy::configureLimits(max_speed_, max_accel_);
-  resetTravelOffset();
-
-  for (const hardware_interface::ComponentInfo & joint : info_.joints)
-  {
-    // HuskyBase has exactly two states and one command interface on each joint
-    if (joint.command_interfaces.size() != 1)
-    {
-      RCLCPP_FATAL(
-        rclcpp::get_logger(HW_NAME),
-        "Joint '%s' has %d command interfaces found. 1 expected.", joint.name.c_str(),
-        joint.command_interfaces.size());
-      return hardware_interface::return_type::ERROR;
-    }
-
-    if (joint.command_interfaces[0].name != hardware_interface::HW_IF_VELOCITY)
-    {
-      RCLCPP_FATAL(
-        rclcpp::get_logger(HW_NAME),
-        "Joint '%s' have %s command interfaces found. '%s' expected.", joint.name.c_str(),
-        joint.command_interfaces[0].name.c_str(), hardware_interface::HW_IF_VELOCITY);
-      return hardware_interface::return_type::ERROR;
-    }
-
-    if (joint.state_interfaces.size() != 2)
-    {
-      RCLCPP_FATAL(
-        rclcpp::get_logger(HW_NAME),
-        "Joint '%s' has %d state interface. 2 expected.", joint.name.c_str(),
-        joint.state_interfaces.size());
-      return hardware_interface::return_type::ERROR;
-    }
-
-    if (joint.state_interfaces[0].name != hardware_interface::HW_IF_POSITION)
-    {
-      RCLCPP_FATAL(
-        rclcpp::get_logger(HW_NAME),
-        "Joint '%s' have '%s' as first state interface. '%s' and '%s' expected.",
-        joint.name.c_str(), joint.state_interfaces[0].name.c_str(),
-        hardware_interface::HW_IF_POSITION);
-      return hardware_interface::return_type::ERROR;
-    }
-
-    if (joint.state_interfaces[1].name != hardware_interface::HW_IF_VELOCITY)
-    {
-      RCLCPP_FATAL(
-        rclcpp::get_logger(HW_NAME),
-        "Joint '%s' have '%s' as second state interface. '%s' expected.", joint.name.c_str(),
-        joint.state_interfaces[1].name.c_str(), hardware_interface::HW_IF_VELOCITY);
-      return hardware_interface::return_type::ERROR;
-    }
-  }
-
-  status_ = hardware_interface::status::CONFIGURED;
-  return hardware_interface::return_type::OK;
+  executor->add_node(cm);
+  executor->spin();
+  cm_thread.join();
+  rclcpp::shutdown();
+  return 0;
 }
-
-std::vector<hardware_interface::StateInterface> HuskyBase::export_state_interfaces()
-{
-  std::vector<hardware_interface::StateInterface> state_interfaces;
-  for (auto i = 0u; i < info_.joints.size(); i++)
-  {
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-      info_.joints[i].name, hardware_interface::HW_IF_POSITION, &hw_states_position_[i]));
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-      info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &hw_states_velocity_[i]));
-  }
-
-  return state_interfaces;
-}
-
-std::vector<hardware_interface::CommandInterface> HuskyBase::export_command_interfaces()
-{
-  std::vector<hardware_interface::CommandInterface> command_interfaces;
-
-  for (auto i = 0u; i < info_.joints.size(); i++)
-  {
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &hw_commands_[i]));
-  }
-
-  return command_interfaces;
-}
-
-hardware_interface::return_type HuskyBase::start()
-{
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Starting ...please wait...");
-
-  for (auto i = 0; i <= hw_start_sec_; i++)
-  {
-    rclcpp::sleep_for(std::chrono::seconds(1));
-    RCLCPP_INFO(
-      rclcpp::get_logger(HW_NAME), "%.1f seconds left...", hw_start_sec_ - i);
-  }
-
-  // set some default values
-  for (auto i = 0u; i < hw_states_position_.size(); i++)
-  {
-    if (std::isnan(hw_states_position_[i]))
-    {
-      hw_states_position_[i] = 0;
-      hw_states_position_offset_[i] = 0;
-      hw_states_velocity_[i] = 0;
-      hw_commands_[i] = 0;
-    }
-  }
-
-  status_ = hardware_interface::status::STARTED;
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "System Successfully started!");
-
-  return hardware_interface::return_type::OK;
-}
-
-hardware_interface::return_type HuskyBase::stop()
-{
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Stopping ...please wait...");
-
-  for (auto i = 0u; i <= hw_stop_sec_; i++)
-  {
-    rclcpp::sleep_for(std::chrono::seconds(1));
-    RCLCPP_INFO(
-      rclcpp::get_logger(HW_NAME), "%.1f seconds left...", hw_stop_sec_ - i);
-  }
-
-  status_ = hardware_interface::status::STOPPED;
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "System successfully stopped!");
-
-  return hardware_interface::return_type::OK;
-}
-
-hardware_interface::return_type HuskyBase::read()
-{
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Reading from hardware");
-
-  updateJointsFromHardware();
-
-  for (auto i = 0u; i < hw_states_velocity_.size(); i++)
-  {
-    RCLCPP_INFO(
-      rclcpp::get_logger(HW_NAME),
-      "Got position state %.5f and velocity state %.5f for '%s'!",
-      hw_states_position_[i], hw_states_velocity_[i], info_.joints[i].name.c_str());
-  }
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Joints successfully read!");
-
-  return hardware_interface::return_type::OK;
-}
-
-hardware_interface::return_type HuskyBase::write()
-{
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Writing to hardware");
-
-  writeCommandsToHardware();
-
-  for (auto i = 0u; i < hw_commands_.size(); i++)
-  {
-    // Simulate sending commands to the hardware
-    RCLCPP_INFO(
-      rclcpp::get_logger(HW_NAME), "Got velocity command %.5f for '%s'!", hw_commands_[i],
-      info_.joints[i].name.c_str());
-  }
-
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Joints successfully written!");
-
-  return hardware_interface::return_type::OK;
-}
-
-}  // namespace husky_base
-
-#include "pluginlib/class_list_macros.hpp"
-PLUGINLIB_EXPORT_CLASS(
-  husky_base::HuskyBase, hardware_interface::SystemInterface)
