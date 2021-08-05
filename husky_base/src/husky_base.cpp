@@ -68,6 +68,7 @@ int main(int argc, char ** argv)
       }
       RCLCPP_INFO(cm->get_logger(), "update rate is %d Hz", update_rate);
 
+      cm->load_controller("husky_velocity_controller", "diff_drive_controller/DiffDriveController");
       while (rclcpp::ok()) 
       {
         std::chrono::system_clock::time_point begin = std::chrono::system_clock::now();
