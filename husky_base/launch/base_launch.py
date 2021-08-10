@@ -49,12 +49,12 @@ def generate_launch_description():
         },
     )
 
-    husky_base_node = Node(
-        package="husky_base",
-        executable="husky_node",
-        output="screen",
-        parameters=[robot_description],    
-    )
+    # husky_base_node = Node(
+    #     package="husky_base",
+    #     executable="husky_node",
+    #     output="screen",
+    #     parameters=[robot_description],    
+    # )
 
     spawn_controller = Node(
         package="controller_manager",
@@ -63,11 +63,19 @@ def generate_launch_description():
         output="screen",
     )
 
+    spawn_husky_velocity_controller = Node(
+        package="controller_manager",
+        executable="spawner.py",
+        arguments=["husky_velocity_controller"],
+        output="screen",
+    )
+
     return LaunchDescription(
         [
             node_robot_state_publisher,
             controller_manager_node,
-            husky_base_node,
+            # husky_base_node,
             spawn_controller,
+            spawn_husky_velocity_controller,
         ]
     )
