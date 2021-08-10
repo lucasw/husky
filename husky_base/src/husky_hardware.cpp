@@ -297,38 +297,38 @@ hardware_interface::return_type HuskyHardware::stop()
 
 hardware_interface::return_type HuskyHardware::read()
 {
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Reading from hardware");
+  RCLCPP_DEBUG(rclcpp::get_logger(HW_NAME), "Reading from hardware");
 
   updateJointsFromHardware();
 
   for (auto i = 0u; i < hw_states_velocity_.size(); i++)
   {
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       rclcpp::get_logger(HW_NAME),
       "Got position state %.5f and velocity state %.5f for '%s'!",
       hw_states_position_[i], hw_states_velocity_[i], info_.joints[i].name.c_str());
   }
 
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Joints successfully read!");
+  RCLCPP_DEBUG(rclcpp::get_logger(HW_NAME), "Joints successfully read!");
 
   return hardware_interface::return_type::OK;
 }
 
 hardware_interface::return_type HuskyHardware::write()
 {
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Writing to hardware");
+  RCLCPP_DEBUG(rclcpp::get_logger(HW_NAME), "Writing to hardware");
 
   writeCommandsToHardware();
 
   for (auto i = 0u; i < hw_commands_.size(); i++)
   {
     // Simulate sending commands to the hardware
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       rclcpp::get_logger(HW_NAME), "Got velocity command %.5f for '%s'!", hw_commands_[i],
       info_.joints[i].name.c_str());
   }
 
-  RCLCPP_INFO(rclcpp::get_logger(HW_NAME), "Joints successfully written!");
+  RCLCPP_DEBUG(rclcpp::get_logger(HW_NAME), "Joints successfully written!");
 
   return hardware_interface::return_type::OK;
 }
